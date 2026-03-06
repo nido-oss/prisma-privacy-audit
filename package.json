@@ -1,0 +1,47 @@
+{
+  "name": "prisma-privacy-audit",
+  "version": "0.0.1",
+  "description": "GDPR audit trail and Data Subject Request automation for Prisma ORM",
+  "license": "MIT",
+  "author": "Karelys Denis",
+  "keywords": [
+    "prisma",
+    "prisma-extension",
+    "gdpr",
+    "audit",
+    "privacy",
+    "data-subject-request",
+    "dsr",
+    "compliance",
+    "typescript"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "peerDependencies": {
+    "@prisma/client": ">=5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@prisma/client": "^5.0.0",
+    "prisma": "^5.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  }
+}
