@@ -162,7 +162,7 @@ export function withPrivacyAudit(config: PrivacyAuditConfig) {
         // Uses `any` — Prisma's $allModels.$allOperations generics require it.
         // The public API surface (PrivacyAuditConfig, AuditContext, DSR methods) is fully typed.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        async $allOperations({ model, operation, args, query, ...rest }: any) {
+        async $allOperations(this: any, { model, operation, args, query }: any) {
           const modelConfig: SensitiveModelConfig | undefined =
             model != null ? config.sensitiveModels[model as string] : undefined
 
@@ -173,7 +173,7 @@ export function withPrivacyAudit(config: PrivacyAuditConfig) {
           if (!modelConfig) return result
 
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const ctx: AuditContext | undefined = (rest as any)[AUDIT_CONTEXT]
+          const ctx: AuditContext | undefined = (this as any)[AUDIT_CONTEXT]
 
           // Read operations: detect and log cross-user access
           const isRead = ['findUnique', 'findFirst', 'findMany', 'findUniqueOrThrow', 'findFirstOrThrow'].includes(operation as string)
@@ -206,9 +206,7 @@ export function withPrivacyAudit(config: PrivacyAuditConfig) {
         this: object,
         ctx: AuditContext,
       ): object {
-        // TODO: return Object.assign(Object.create(this), { [AUDIT_CONTEXT]: ctx })
-        void ctx
-        return this
+        return Object.assign(Object.create(this), { [AUDIT_CONTEXT]: ctx })
       },
 
       /**

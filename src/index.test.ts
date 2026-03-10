@@ -81,6 +81,21 @@ describe('withPrivacyAudit', () => {
     expect(typeof ext.client.$withAuditContext).toBe('function')
   })
 
+  test('$withAuditContext returns a new object, not the same reference', () => {
+    const ext = withPrivacyAudit(minimalConfig)
+    const fakeClient = {}
+    const scoped = ext.client.$withAuditContext.call(fakeClient, { accessorId: 'user-a' })
+    expect(scoped).not.toBe(fakeClient)
+  })
+
+  test('$withAuditContext scoped client inherits from the original via prototype chain', () => {
+    const ext = withPrivacyAudit(minimalConfig)
+    const fakeClient = { someMethod: () => 'ok' }
+    const scoped = ext.client.$withAuditContext.call(fakeClient, { accessorId: 'user-a' }) as typeof fakeClient
+    expect(scoped.someMethod).toBe(fakeClient.someMethod)
+    expect(Object.getPrototypeOf(scoped)).toBe(fakeClient)
+  })
+
   test('client extension exposes exportUserData', () => {
     const ext = withPrivacyAudit(minimalConfig)
     expect(ext.client).toHaveProperty('exportUserData')
