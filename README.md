@@ -15,8 +15,11 @@ data under GDPR Article 9 (special category data).
 import { PrismaClient } from '@prisma/client'
 import { withPrivacyAudit } from 'prisma-privacy-audit'
 
-const prisma = new PrismaClient().$extends(
+const basePrisma = new PrismaClient()
+
+const prisma = basePrisma.$extends(
   withPrivacyAudit({
+    prisma: basePrisma,   // required for audit log persistence
     sensitiveModels: {
       CycleEntry: { fields: ['notes'], subjectField: 'userId' },
       MoodEntry:   { fields: ['notes'], subjectField: 'userId' },
@@ -26,7 +29,6 @@ const prisma = new PrismaClient().$extends(
       },
     },
     auditLog: {
-      retention: 90,        // days before auto-purge
       onFailure: 'silent',  // 'silent' | 'store' | 'throw'
     },
     dsr: {
@@ -59,13 +61,14 @@ const { receipt } = await prisma.eraseUserData({ subjectId: userId })
 ## Features
 
 **Access audit logging**
-A Prisma `$extends` extension that logs every read of configured sensitive fields:
-`accessorId`, `subjectId`, `model`, `field`, `action`, `accessLevel`, `timestamp`.
-Non-blocking: audit writes never delay a request. Configurable retention with auto-expiry.
+A Prisma `$extends` extension that logs cross-user reads on models containing sensitive fields:
+`accessorId`, `subjectId`, `model`, `action`, `accessLevel`, `timestamp`.
+Non-blocking: audit writes never delay a request. Call `purgeExpiredLogs` periodically to enforce retention.
 
-**GDPR Data Subject Request automation**
-Declarative handlers for Article 15 (export all personal data as JSON/CSV)
-and Article 17 (cascading deletion per model, with a tamper-evident receipt).
+**GDPR Data Subject Request automation** *(in development)*
+Declarative configuration for Article 15 (structured personal data export as JSON/CSV)
+and Article 17 (cascading erasure with tamper-evident receipt). API surface and types
+are complete. Handler implementations are in progress (see roadmap).
 
 **Granular sharing model**
 When user A shares their data with user B at a given access level (e.g.
@@ -92,8 +95,8 @@ const prisma = new PrismaClient()
 - [x] `$extends` architecture and API surface
 - [x] Cross-user read detection (unit tested)
 - [x] `purgeExpiredLogs` utility
-- [ ] Audit log persistence (PrivacyAuditLog table)
-- [ ] `$withAuditContext` (request-scoped client binding)
+- [x] Audit log persistence (PrivacyAuditLog table)
+- [x] `$withAuditContext` (request-scoped client binding)
 - [ ] DSR Export handler (Article 15)
 - [ ] DSR Erasure handler (Article 17) with tamper-evident receipt
 - [ ] Write logging
