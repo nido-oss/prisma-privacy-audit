@@ -4,14 +4,15 @@
  * These tests cover:
  *   - Extension shape and configuration defaults
  *   - Cross-user read detection logic (_collectCrossUserReads)
+ *   - Audit log persistence (mock Prisma client)
  *   - purgeExpiredLogs utility
  *   - DSR method stubs
  *
  * Integration tests (actual $extends interception against a test database)
- * are planned once the PrivacyAuditLog persistence layer is implemented.
+ * are in describe.todo blocks below. They require a real database connection.
  */
 
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import {
   withPrivacyAudit,
   purgeExpiredLogs,
@@ -47,7 +48,6 @@ const fullConfig: PrivacyAuditConfig = {
     },
   },
   auditLog: {
-    retention: 60,
     logSelfAccess: true,
     logWrites: true,
     samplingRate: 0.5,
@@ -194,10 +194,166 @@ describe('_collectCrossUserReads', () => {
   })
 })
 
+describe('audit log persistence', () => {
+  const ctx = { accessorId: 'user-a' }
+  const record = { id: '1', userId: 'user-b', notes: 'sensitive' }
+
+  function makeScopedClient(ext: ReturnType<typeof withPrivacyAudit>) {
+    return ext.client.$withAuditContext.call({}, ctx)
+  }
+
+  test('calls prisma.privacyAuditLog.create on cross-user read', async () => {
+    const mockCreate = vi.fn().mockResolvedValue({})
+    const mockPrisma = { privacyAuditLog: { create: mockCreate } }
+
+    const ext = withPrivacyAudit({ ...minimalConfig, prisma: mockPrisma })
+    const scopedClient = makeScopedClient(ext)
+
+    await ext.query.$allModels.$allOperations.call(scopedClient, {
+      model: 'CycleEntry',
+      operation: 'findUnique',
+      args: {},
+      query: async () => record,
+    })
+
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(mockCreate).toHaveBeenCalledOnce()
+    expect(mockCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        accessorId: 'user-a',
+        subjectId: 'user-b',
+        model: 'CycleEntry',
+        action: 'read',
+      }),
+    })
+  })
+
+  test('does not call prisma.privacyAuditLog.create when prisma is not configured', async () => {
+    const mockCreate = vi.fn()
+
+    const ext = withPrivacyAudit(minimalConfig)
+    const scopedClient = makeScopedClient(ext)
+
+    await ext.query.$allModels.$allOperations.call(scopedClient, {
+      model: 'CycleEntry',
+      operation: 'findUnique',
+      args: {},
+      query: async () => record,
+    })
+
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  test('onFailure: silent swallows persistence errors', async () => {
+    const mockCreate = vi.fn().mockRejectedValue(new Error('DB down'))
+    const mockPrisma = { privacyAuditLog: { create: mockCreate } }
+
+    const ext = withPrivacyAudit({
+      ...minimalConfig,
+      prisma: mockPrisma,
+      auditLog: { onFailure: 'silent' },
+    })
+    const scopedClient = makeScopedClient(ext)
+
+    await ext.query.$allModels.$allOperations.call(scopedClient, {
+      model: 'CycleEntry',
+      operation: 'findUnique',
+      args: {},
+      query: async () => record,
+    })
+
+    await new Promise((r) => setTimeout(r, 0))
+
+    // main operation returned the result despite the persistence failure
+    expect(mockCreate).toHaveBeenCalledOnce()
+  })
+
+  test('does not log when there is no audit context (plain prisma, no $withAuditContext)', async () => {
+    const mockCreate = vi.fn().mockResolvedValue({})
+    const mockPrisma = { privacyAuditLog: { create: mockCreate } }
+
+    const ext = withPrivacyAudit({ ...minimalConfig, prisma: mockPrisma })
+
+    // No $withAuditContext — this is the plain client case
+    await ext.query.$allModels.$allOperations.call({}, {
+      model: 'CycleEntry',
+      operation: 'findUnique',
+      args: {},
+      query: async () => record,
+    })
+
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  test('does not log reads on models not in sensitiveModels', async () => {
+    const mockCreate = vi.fn().mockResolvedValue({})
+    const mockPrisma = { privacyAuditLog: { create: mockCreate } }
+
+    const ext = withPrivacyAudit({ ...minimalConfig, prisma: mockPrisma })
+    const scopedClient = makeScopedClient(ext)
+
+    await ext.query.$allModels.$allOperations.call(scopedClient, {
+      model: 'PublicModel', // not in sensitiveModels
+      operation: 'findMany',
+      args: {},
+      query: async () => [record],
+    })
+
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  test('does not log write operations when logWrites is false (default)', async () => {
+    const mockCreate = vi.fn().mockResolvedValue({})
+    const mockPrisma = { privacyAuditLog: { create: mockCreate } }
+
+    const ext = withPrivacyAudit({ ...minimalConfig, prisma: mockPrisma })
+    const scopedClient = makeScopedClient(ext)
+
+    await ext.query.$allModels.$allOperations.call(scopedClient, {
+      model: 'CycleEntry',
+      operation: 'create',
+      args: { data: record },
+      query: async () => record,
+    })
+
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  test('onFailure: throw surfaces persistence errors to the caller', async () => {
+    const mockCreate = vi.fn().mockRejectedValue(new Error('DB down'))
+    const mockPrisma = { privacyAuditLog: { create: mockCreate } }
+
+    const ext = withPrivacyAudit({
+      ...minimalConfig,
+      prisma: mockPrisma,
+      auditLog: { onFailure: 'throw' },
+    })
+    const scopedClient = makeScopedClient(ext)
+
+    await expect(
+      ext.query.$allModels.$allOperations.call(scopedClient, {
+        model: 'CycleEntry',
+        operation: 'findUnique',
+        args: {},
+        query: async () => record,
+      }),
+    ).rejects.toThrow('DB down')
+  })
+})
+
 describe('exportUserData (stub)', () => {
   test('throws not yet implemented', async () => {
     const ext = withPrivacyAudit(minimalConfig)
-    // Called as standalone to test the stub — in production: prisma.exportUserData({ ... })
+    // Called as standalone to test the stub. In production: prisma.exportUserData({ ... })
     await expect(
       ext.client.exportUserData.call({}, { subjectId: 'user-a' }),
     ).rejects.toThrow('not yet implemented')
@@ -214,21 +370,51 @@ describe('eraseUserData (stub)', () => {
 })
 
 describe('purgeExpiredLogs', () => {
-  test('returns { deleted: 0 } (stub)', async () => {
+  test('calls deleteMany with a cutoff date and returns deleted count', async () => {
+    const mockDeleteMany = vi.fn().mockResolvedValue({ count: 42 })
+    const mockPrisma = { privacyAuditLog: { deleteMany: mockDeleteMany } }
+
+    const result = await purgeExpiredLogs(mockPrisma, 90)
+
+    expect(result).toEqual({ deleted: 42 })
+    expect(mockDeleteMany).toHaveBeenCalledOnce()
+    expect(mockDeleteMany).toHaveBeenCalledWith({
+      where: { createdAt: { lt: expect.any(Date) } },
+    })
+  })
+
+  test('cutoff date is approximately retentionDays ago', async () => {
+    const mockDeleteMany = vi.fn().mockResolvedValue({ count: 0 })
+    const mockPrisma = { privacyAuditLog: { deleteMany: mockDeleteMany } }
+
+    const before = new Date()
+    await purgeExpiredLogs(mockPrisma, 30)
+    const after = new Date()
+
+    const cutoff: Date = mockDeleteMany.mock.calls[0][0].where.createdAt.lt
+    const expectedCutoff = new Date(before)
+    expectedCutoff.setDate(expectedCutoff.getDate() - 30)
+
+    expect(cutoff.getTime()).toBeGreaterThanOrEqual(expectedCutoff.getTime() - 1000)
+    expect(cutoff.getTime()).toBeLessThanOrEqual(after.getTime())
+  })
+
+  test('returns { deleted: 0 } when prisma is null', async () => {
     const result = await purgeExpiredLogs(null)
     expect(result).toEqual({ deleted: 0 })
   })
 
-  test('accepts custom retention days without throwing', async () => {
-    await expect(purgeExpiredLogs(null, 30)).resolves.toEqual({ deleted: 0 })
-    await expect(purgeExpiredLogs(null, 365)).resolves.toEqual({ deleted: 0 })
-  })
+  test('defaults to 90-day retention', async () => {
+    const mockDeleteMany = vi.fn().mockResolvedValue({ count: 0 })
+    const mockPrisma = { privacyAuditLog: { deleteMany: mockDeleteMany } }
 
-  test('uses 90-day default when no retention is specified', async () => {
-    // Default behavior: does not throw, returns correct shape
-    const result = await purgeExpiredLogs(null)
-    expect(result).toHaveProperty('deleted')
-    expect(typeof result.deleted).toBe('number')
+    await purgeExpiredLogs(mockPrisma)
+
+    const cutoff: Date = mockDeleteMany.mock.calls[0][0].where.createdAt.lt
+    const ninetyDaysAgo = new Date()
+    ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90)
+
+    expect(Math.abs(cutoff.getTime() - ninetyDaysAgo.getTime())).toBeLessThan(1000)
   })
 })
 

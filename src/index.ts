@@ -12,11 +12,13 @@
  * See docs/RFC-001-api-design.md for open API design questions.
  */
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-import type { Prisma } from '@prisma/client'
-
 export interface SensitiveModelConfig {
-  /** Fields to audit on this model. */
+  /**
+   * Sensitive fields on this model.
+   * Used to scope write logging when logWrites is enabled.
+   * Read logging is at model level: any cross-user read of the model is logged
+   * regardless of which fields were selected.
+   */
   fields: string[]
   /**
    * Name of the field that identifies the data owner (subject).
@@ -27,22 +29,20 @@ export interface SensitiveModelConfig {
 }
 
 export interface AuditLogConfig {
-  /** Days before audit entries are eligible for purge. Default: 90. */
-  retention?: number
   /** Log reads where accessor === subject (self-reads). Default: false. */
   logSelfAccess?: boolean
   /** Log create/update of sensitive fields. Default: false. */
   logWrites?: boolean
   /**
-   * Fraction of reads to log (0.0–1.0). Default: 1.0.
+   * Fraction of reads to log (0.0 to 1.0). Default: 1.0.
    * Reduce in high-traffic environments where full logging is too expensive.
    */
   samplingRate?: number
   /**
    * What to do when an audit write fails.
-   *   'silent' — swallow the error (default)
-   *   'store'  — write to PrivacyAuditDeadLetter table for later retry
-   *   'throw'  — surface the error to the caller
+   *   'silent': swallow the error (default)
+   *   'store': write to PrivacyAuditDeadLetter table for later retry
+   *   'throw': surface the error to the caller
    */
   onFailure?: 'silent' | 'store' | 'throw'
 }
@@ -50,9 +50,9 @@ export interface AuditLogConfig {
 export interface DSRModelConfig {
   /**
    * How to handle this model during erasure.
-   *   'hard-delete' — physical deletion via deleteMany
-   *   'anonymize'   — nullify personal fields, preserve record structure
-   *   'preserve'    — do not delete (e.g., audit logs are legal records)
+   *   'hard-delete': physical deletion via deleteMany
+   *   'anonymize': nullify personal fields, preserve record structure
+   *   'preserve': do not delete (e.g., audit logs are legal records)
    */
   strategy: 'hard-delete' | 'anonymize' | 'preserve'
   /** Fields to nullify when strategy is 'anonymize'. */
@@ -60,6 +60,12 @@ export interface DSRModelConfig {
 }
 
 export interface PrivacyAuditConfig {
+  /**
+   * Prisma client used to persist audit log entries.
+   * Requires a PrivacyAuditLog model in the schema (see ARCHITECTURE.md).
+   * If omitted, cross-user reads are detected but not persisted.
+   */
+  prisma?: unknown
   /** Which models contain sensitive fields and who owns them. */
   sensitiveModels: Record<string, SensitiveModelConfig>
   /** Audit log options. */
@@ -95,7 +101,8 @@ interface LogEntry {
  * Prisma $extends extension that adds access audit logging and GDPR DSR handling.
  *
  * Usage:
- *   const prisma = new PrismaClient().$extends(withPrivacyAudit({ ... }))
+ *   const basePrisma = new PrismaClient()
+ *   const prisma = basePrisma.$extends(withPrivacyAudit({ prisma: basePrisma, ... }))
  *
  * Compose with prisma-field-encryption (47ng) by applying encryption first:
  *   const prisma = new PrismaClient()
@@ -103,57 +110,70 @@ interface LogEntry {
  *     .$extends(withPrivacyAudit({ ... })) // audit layer sees plaintext
  */
 export function withPrivacyAudit(config: PrivacyAuditConfig) {
-  const logConfig: Required<AuditLogConfig> = {
-    retention: config.auditLog?.retention ?? 90,
+  const logConfig = {
     logSelfAccess: config.auditLog?.logSelfAccess ?? false,
     logWrites: config.auditLog?.logWrites ?? false,
     samplingRate: config.auditLog?.samplingRate ?? 1.0,
     onFailure: config.auditLog?.onFailure ?? 'silent',
   }
 
-  async function persistAuditEntry(_entry: LogEntry): Promise<void> {
-    // TODO: (_auditPrisma as any).privacyAuditLog.create({ data: { ..._entry } })
-  }
-
-  // Non-blocking audit entry write.
-  // Intentionally not awaited — the audit log must never block or fail
-  // the request lifecycle. Failure is handled per logConfig.onFailure.
-  function fireAndForgetLog(entry: LogEntry): void {
-    persistAuditEntry(entry).catch((err: unknown) => {
-      if (logConfig.onFailure === 'throw') throw err
-      if (logConfig.onFailure === 'store') {
-        // TODO: write to PrivacyAuditDeadLetter table for inspection and retry
-      }
-      // 'silent': swallow — intentional
+  async function persistAuditEntry(entry: LogEntry): Promise<void> {
+    if (!config.prisma) return
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (config.prisma as any).privacyAuditLog.create({
+      data: {
+        accessorId: entry.accessorId,
+        subjectId: entry.subjectId,
+        model: entry.model,
+        action: entry.action,
+        accessLevel: entry.accessLevel,
+      },
     })
   }
 
-  function detectAndLogCrossUserReads(
+  // Schedules an audit entry write and returns the promise.
+  // For 'silent' and 'store', callers drop the return value (fire-and-forget).
+  // For 'throw', callers await it so errors surface to the request lifecycle.
+  function scheduleLog(entry: LogEntry): Promise<void> {
+    return persistAuditEntry(entry).catch((err: unknown) => {
+      if (logConfig.onFailure === 'store') {
+        // TODO: write to PrivacyAuditDeadLetter table for inspection and retry
+      }
+      if (logConfig.onFailure === 'throw') throw err
+      // 'silent': swallow
+    })
+  }
+
+  function buildLogPromises(
     ctx: AuditContext,
     model: string,
     modelConfig: SensitiveModelConfig,
     result: unknown,
-  ): void {
-    if (result == null) return
+  ): Promise<void>[] {
+    if (result == null) return []
 
     const toLog = _collectCrossUserReads(ctx, modelConfig, result, logConfig.logSelfAccess)
+    const promises: Promise<void>[] = []
 
     for (const entry of toLog) {
       if (logConfig.samplingRate < 1.0 && Math.random() > logConfig.samplingRate) continue
-
-      fireAndForgetLog({
-        accessorId: ctx.accessorId,
-        subjectId: entry.subjectId,
-        model,
-        action: 'read',
-        accessLevel: ctx.accessLevel,
-      })
+      promises.push(
+        scheduleLog({
+          accessorId: ctx.accessorId,
+          subjectId: entry.subjectId,
+          model,
+          action: 'read',
+          accessLevel: ctx.accessLevel,
+        }),
+      )
     }
+
+    return promises
   }
 
   // Return the extension config as a plain object.
   // PrismaClient.$extends() accepts both the plain object form and the
-  // Prisma.defineExtension() wrapper — we use the plain form for testability.
+  // Prisma.defineExtension() wrapper. We use the plain form for testability.
   return {
     name: 'prisma-privacy-audit' as const,
 
@@ -166,19 +186,21 @@ export function withPrivacyAudit(config: PrivacyAuditConfig) {
           const modelConfig: SensitiveModelConfig | undefined =
             model != null ? config.sensitiveModels[model as string] : undefined
 
-          // Execute the actual query first — audit logging is non-blocking
-          // and must never delay or block the response.
+          // Execute the actual query first. Audit logging runs after and is
+          // fire-and-forget for 'silent'/'store'. For 'throw', it blocks intentionally.
           const result = await query(args)
 
           if (!modelConfig) return result
 
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const ctx: AuditContext | undefined = (this as any)[AUDIT_CONTEXT]
+          const ctx: AuditContext | undefined = this[AUDIT_CONTEXT]
 
           // Read operations: detect and log cross-user access
           const isRead = ['findUnique', 'findFirst', 'findMany', 'findUniqueOrThrow', 'findFirstOrThrow'].includes(operation as string)
           if (isRead && ctx) {
-            detectAndLogCrossUserReads(ctx, model as string, modelConfig, result)
+            const logPromises = buildLogPromises(ctx, model as string, modelConfig, result)
+            if (logConfig.onFailure === 'throw') {
+              await Promise.all(logPromises)
+            }
           }
 
           // Write operations: log creation/modification of sensitive fields
@@ -210,9 +232,9 @@ export function withPrivacyAudit(config: PrivacyAuditConfig) {
       },
 
       /**
-       * GDPR Article 15 — Right of access.
+       * GDPR Article 15 (right of access).
        * Exports all personal data for a given subject across configured models.
-       * See ARCHITECTURE.md §"DSR handler design" for the planned implementation.
+       * See ARCHITECTURE.md for the planned implementation.
        */
       async exportUserData(
         this: object,
@@ -222,10 +244,10 @@ export function withPrivacyAudit(config: PrivacyAuditConfig) {
       },
 
       /**
-       * GDPR Article 17 — Right to erasure.
+       * GDPR Article 17 (right to erasure).
        * Executes cascading deletion/anonymisation per DSR model strategy.
        * Returns a tamper-evident receipt with SHA-256 hash for non-repudiation.
-       * See ARCHITECTURE.md §"DSR handler design" for the planned implementation.
+       * See ARCHITECTURE.md for the planned implementation.
        */
       async eraseUserData(
         this: object,
@@ -290,9 +312,9 @@ export interface ExportResult {
 }
 
 /**
- * Deletes PrivacyAuditLog entries older than retentionDays.
+ * Deletes PrivacyAuditLog entries older than retentionDays (default: 90).
  *
- * Call periodically — on server startup, via cron, or a scheduled job.
+ * Call periodically: on server startup, via cron, or a scheduled job.
  * Can be called independently of the extension.
  *
  * Example:
@@ -301,10 +323,15 @@ export interface ExportResult {
  *   )
  */
 export async function purgeExpiredLogs(
-  _prisma: unknown,
+  prisma: unknown,
   retentionDays: number = 90,
 ): Promise<{ deleted: number }> {
-  void retentionDays
-  // TODO: prisma.privacyAuditLog.deleteMany({ where: { createdAt: { lt: cutoff } } })
-  return { deleted: 0 }
+  if (!prisma) return { deleted: 0 }
+  const cutoff = new Date()
+  cutoff.setDate(cutoff.getDate() - retentionDays)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { count } = await (prisma as any).privacyAuditLog.deleteMany({
+    where: { createdAt: { lt: cutoff } },
+  })
+  return { deleted: count }
 }
