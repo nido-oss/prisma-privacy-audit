@@ -1,6 +1,6 @@
 # RFC-001: Public API Design
 
-**Status:** open for comment
+**Status:** open for comment ([discussion thread](https://github.com/orgs/nido-oss/discussions/1))
 **Author:** Karelys Denis ([@karelysdenis](https://github.com/karelysdenis))
 **Created:** March 2026
 **Related:** [ARCHITECTURE.md](../ARCHITECTURE.md)
