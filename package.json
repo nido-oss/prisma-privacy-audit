@@ -1,6 +1,6 @@
 {
   "name": "prisma-privacy-audit",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "GDPR audit trail and Data Subject Request automation for Prisma ORM",
   "license": "MIT",
   "author": "Karelys Denis",
@@ -25,7 +25,9 @@
       "require": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "peerDependencies": {
     "@prisma/client": ">=5.0.0"
   },
