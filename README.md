@@ -112,7 +112,7 @@ const prisma = new PrismaClient()
 
 ## Contributing
 
-Open questions and feedback in [RFC-001](docs/RFC-001-api-design.md).
+Open questions and feedback in [RFC-001](https://github.com/nido-oss/prisma-privacy-audit/blob/master/docs/RFC-001-api-design.md).
 Issues welcome on GitHub.
 
 ## License
