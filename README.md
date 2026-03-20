@@ -102,7 +102,7 @@ const prisma = new PrismaClient()
 - [ ] Write logging
 - [ ] Compatibility with `prisma-field-encryption`
 - [ ] Independent security audit
-- [ ] npm publication
+- [x] npm publication
 
 ## Requirements
 
